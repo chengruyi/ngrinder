@@ -16,6 +16,7 @@ package org.ngrinder.agent.controller;
 import org.ngrinder.agent.service.AgentPackageService;
 import org.ngrinder.common.controller.BaseController;
 import org.ngrinder.common.util.FileDownloadUtils;
+import org.ngrinder.infra.config.Config;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.ModelMap;
@@ -25,7 +26,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import javax.servlet.http.HttpServletResponse;
 
 import java.io.File;
+import java.net.URLClassLoader;
 
+import static org.ngrinder.agent.model.NGrinderPackage.MONITOR;
 import static org.ngrinder.common.util.ExceptionUtils.processException;
 
 /**
@@ -41,6 +44,8 @@ public class MonitorDownloadController extends BaseController {
 	@Autowired
 	private AgentPackageService agentPackageService;
 
+	@Autowired
+	private Config config;
 
 	/**
 	 * Download monitor.
@@ -64,7 +69,8 @@ public class MonitorDownloadController extends BaseController {
 	@RequestMapping(value = "/download")
 	public String download(ModelMap model) {
 		try {
-			final File monitorPackage = agentPackageService.createMonitorPackage();
+			final File monitorPackage = agentPackageService.createPackage(MONITOR, (URLClassLoader) getClass().getClassLoader(),
+				"", null, config.getMonitorPort(), "");
 			model.clear();
 			return "redirect:/monitor/download/" + monitorPackage.getName();
 		} catch (Exception e) {

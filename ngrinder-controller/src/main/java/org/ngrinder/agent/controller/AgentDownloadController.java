@@ -29,6 +29,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.File;
 
+import static org.ngrinder.agent.model.NGrinderPackage.AGENT;
 import static org.ngrinder.common.util.ExceptionUtils.processException;
 import static org.ngrinder.common.util.Preconditions.checkNotEmpty;
 import static org.ngrinder.common.util.Preconditions.checkNotNull;
@@ -105,7 +106,7 @@ public class AgentDownloadController extends BaseController {
 				port = regionInfo.getControllerPort();
 				connectingIP = regionInfo.getIp();
 			}
-			final File agentPackage = agentPackageService.createAgentPackage(region, connectingIP, port, owner);
+			final File agentPackage = agentPackageService.createAgentPackage(AGENT, region, connectingIP, port, owner);
 			modelMap.clear();
 			return "redirect:/agent/download/" + agentPackage.getName();
 		} catch (Exception e) {

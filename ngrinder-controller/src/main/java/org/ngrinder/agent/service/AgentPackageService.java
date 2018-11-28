@@ -8,9 +8,8 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
+import org.ngrinder.agent.model.NGrinderPackage;
 import org.ngrinder.infra.config.Config;
-import org.ngrinder.infra.schedule.ScheduledTaskService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,20 +18,16 @@ import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.core.io.support.ResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
 import java.io.*;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 import static org.apache.commons.lang.StringUtils.isNotEmpty;
-import static org.apache.commons.lang.StringUtils.trimToEmpty;
-import static org.ngrinder.common.util.CollectionUtils.buildMap;
-import static org.ngrinder.common.util.CollectionUtils.newHashMap;
+import static org.ngrinder.agent.model.NGrinderPackage.AGENT;
 import static org.ngrinder.common.util.CompressionUtils.*;
 import static org.ngrinder.common.util.ExceptionUtils.processException;
 
@@ -46,85 +41,32 @@ import static org.ngrinder.common.util.ExceptionUtils.processException;
 public class AgentPackageService {
 	protected static final Logger LOGGER = LoggerFactory.getLogger(AgentPackageService.class);
 	public static final int EXEC = 0x81ed;
-	private static final int TIME_MILLIS_OF_DAY = 1000 * 60 * 60 * 24;
 
 	@Autowired
 	private Config config;
 
-	@Autowired
-	private ScheduledTaskService scheduledTaskService;
-
-	@PostConstruct
-	public void init() {
-		// clean up package directories not to occupy too much spaces.
-		cleanUpPackageDir(true);
-		scheduledTaskService.addFixedDelayedScheduledTask(new Runnable() {
-			@Override
-			public void run() {
-				cleanUpPackageDir(false);
+	/**
+	 * Create package from NGrinderPackage.
+	 *
+	 * @return File package.
+	 */
+	public File createPackage(NGrinderPackage nGrinderPackage, URLClassLoader classLoader, String regionName, String connectionIP, int port, String owner) {
+		synchronized (AgentPackageService.class) {
+			File packageTar = nGrinderPackage.makePackageTar(regionName, connectionIP, owner, false);
+			if (packageTar.exists()) {
+				return packageTar;
 			}
-		}, TIME_MILLIS_OF_DAY);
-	}
-
-	private void cleanUpPackageDir(boolean all) {
-		synchronized (this) {
-			final File packagesDir = getPackagesDir();
-			final File[] files = packagesDir.listFiles();
-			if (files != null) {
-				for (File each : files) {
-					if (!each.isDirectory()) {
-						long expiryTimestamp = each.lastModified() + (TIME_MILLIS_OF_DAY * 2);
-						if (all || expiryTimestamp < System.currentTimeMillis()) {
-							FileUtils.deleteQuietly(each);
-						}
-					}
+			FileUtils.deleteQuietly(packageTar);
+			try (TarArchiveOutputStream tarOutputStream = createTarArchiveStream(packageTar)) {
+				addDependentLibToTarStream(nGrinderPackage, tarOutputStream, classLoader, nGrinderPackage.getBasePath(), nGrinderPackage.getLibPath(), nGrinderPackage.getShellScriptsPath());
+				if (!nGrinderPackage.equals(AGENT) || isNotEmpty(connectionIP)) {
+					addConfigToTar(nGrinderPackage, tarOutputStream, nGrinderPackage.getConfigParam(regionName, connectionIP, port, owner));
 				}
+			} catch (Exception e) {
+				LOGGER.error("Error while generating an agent package" + e.getMessage());
 			}
+			return packageTar;
 		}
-	}
-
-	/**
-	 * Get package name
-	 *
-	 * @param moduleName nGrinder module name.
-	 * @return String module full name.
-	 */
-	public String getPackageName(String moduleName) {
-		return moduleName + "-" + config.getVersion();
-	}
-
-	/**
-	 * Get distributable package name with appropriate extension.
-	 *
-	 * @param moduleName   nGrinder sub  module name.
-	 * @param regionName   region   namee
-	 * @param connectionIP where it will connect to
-	 * @param ownerName    owner name
-	 * @param forWindow    if true, then package type is zip,if false, package type is tar.
-	 * @return String  module full name.
-	 */
-	public String getDistributionPackageName(String moduleName, String regionName, String connectionIP,
-	                                         String ownerName,
-	                                         boolean forWindow) {
-		return getPackageName(moduleName) + getFilenameComponent(regionName) + getFilenameComponent(connectionIP) +
-				getFilenameComponent(ownerName) + (forWindow ? ".zip" : ".tar");
-	}
-
-	private String getFilenameComponent(String value) {
-		value = trimToEmpty(value);
-		if (isNotEmpty(value)) {
-			value = "-" + value;
-		}
-		return value;
-	}
-
-	/**
-	 * Get the agent package containing folder.
-	 *
-	 * @return File  agent package dir.
-	 */
-	public File getPackagesDir() {
-		return config.getHome().getSubFile("download");
 	}
 
 	/**
@@ -132,8 +74,8 @@ public class AgentPackageService {
 	 *
 	 * @return File  agent package.
 	 */
-	public synchronized File createAgentPackage() {
-		return createAgentPackage(null, null, config.getControllerPort(), null);
+	public File createAgentPackage() {
+		return createAgentPackage(AGENT, null, null, config.getControllerPort(), null);
 	}
 
 	/**
@@ -144,102 +86,32 @@ public class AgentPackageService {
 	 * @param owner        owner
 	 * @return File  agent package.
 	 */
-	public synchronized File createAgentPackage(String region, String connectionIP, int port, String owner) {
-		return createAgentPackage((URLClassLoader) getClass().getClassLoader(), region, connectionIP, port, owner);
-	}
-
-	public File createMonitorPackage() {
-		synchronized (AgentPackageService.this) {
-			File monitorPackagesDir = getPackagesDir();
-			if (monitorPackagesDir.mkdirs()) {
-				LOGGER.info("{} is created", monitorPackagesDir.getPath());
+	public File createAgentPackage(NGrinderPackage NGrinderPackage, String region, String connectionIP, int port, String owner) {
+		synchronized (AgentPackageService.class) {
+			if (!NGrinderPackage.equals(AGENT)) {
+				NGrinderPackage = AGENT;
 			}
-			final String packageName = getDistributionPackageName("ngrinder-monitor", "", null, "", false);
-			File monitorPackage = new File(monitorPackagesDir, packageName);
-			if (monitorPackage.exists()) {
-				return monitorPackage;
-			}
-			FileUtils.deleteQuietly(monitorPackage);
-			final String basePath = "ngrinder-monitor/";
-			final String libPath = basePath + "lib/";
-			TarArchiveOutputStream tarOutputStream = null;
-			try {
-				tarOutputStream = createTarArchiveStream(monitorPackage);
-				addFolderToTar(tarOutputStream, basePath);
-				addFolderToTar(tarOutputStream, libPath);
-				final URLClassLoader classLoader = (URLClassLoader) getClass().getClassLoader();
-				Set<String> libs = getMonitorDependentLibs(classLoader);
-				copyShellFile(tarOutputStream, basePath, "monitor");
-
-				for (URL eachUrl : classLoader.getURLs()) {
-					File eachClassPath = new File(eachUrl.getFile());
-					if (!isJar(eachClassPath)) {
-						continue;
-					}
-					if (isMonitorDependentLib(eachClassPath, libs)) {
-						addFileToTar(tarOutputStream, eachClassPath, libPath + eachClassPath.getName());
-					}
-				}
-				addMonitorConfToTar(tarOutputStream, basePath, config.getMonitorPort());
-			} catch (IOException e) {
-				LOGGER.error("Error while generating an monitor package" + e.getMessage());
-			} finally {
-				IOUtils.closeQuietly(tarOutputStream);
-			}
-			return monitorPackage;
+			return createPackage(NGrinderPackage, (URLClassLoader) getClass().getClassLoader(), region, connectionIP, port, owner);
 		}
 	}
 
-	/**
-	 * Create agent package
-	 *
-	 * @param classLoader  URLClass Loader
-	 * @param regionName   region
-	 * @param connectionIP host ip
-	 * @param port         host port
-	 * @param owner        owner
-	 * @return File
-	 */
-	synchronized File createAgentPackage(URLClassLoader classLoader, String regionName, String connectionIP,
-	                                     int port, String owner) {
-		synchronized (AgentPackageService.this) {
-			File agentPackagesDir = getPackagesDir();
-			if (agentPackagesDir.mkdirs()) {
-				LOGGER.info("{} is created", agentPackagesDir.getPath());
-			}
-			final String packageName = getDistributionPackageName("ngrinder-agent",
-					regionName, connectionIP, owner, false);
-			File agentTar = new File(agentPackagesDir, packageName);
-			if (agentTar.exists()) {
-				return agentTar;
-			}
-			FileUtils.deleteQuietly(agentTar);
-			final String basePath = "ngrinder-agent/";
-			final String libPath = basePath + "lib/";
-			TarArchiveOutputStream tarOutputStream = null;
-			try {
-				tarOutputStream = createTarArchiveStream(agentTar);
-				addFolderToTar(tarOutputStream, basePath);
-				addFolderToTar(tarOutputStream, libPath);
-				Set<String> libs = getDependentLibs(classLoader);
-				copyShellFile(tarOutputStream, basePath, "agent");
+	private void addDependentLibToTarStream(NGrinderPackage NGrinderPackage, TarArchiveOutputStream tarOutputStream, URLClassLoader classLoader, String basePath, String libPath, String copyShellPath) throws IOException {
+		if (classLoader == null) {
+			classLoader = (URLClassLoader) getClass().getClassLoader();
+		}
+		addFolderToTar(tarOutputStream, basePath);
+		addFolderToTar(tarOutputStream, libPath);
+		Set<String> libs = NGrinderPackage.getPackageDependentLibs(classLoader);
+		copyShellFile(tarOutputStream, basePath, copyShellPath);
 
-				for (URL eachUrl : classLoader.getURLs()) {
-					File eachClassPath = new File(eachUrl.getFile());
-					if (!isJar(eachClassPath)) {
-						continue;
-					}
-					if (isAgentDependentLib(eachClassPath, libs)) {
-						addFileToTar(tarOutputStream, eachClassPath, libPath + eachClassPath.getName());
-					}
-				}
-				addAgentConfToTar(tarOutputStream, basePath, regionName, connectionIP, port, owner);
-			} catch (IOException e) {
-				LOGGER.error("Error while generating an agent package" + e.getMessage());
-			} finally {
-				IOUtils.closeQuietly(tarOutputStream);
+		for (URL eachUrl : classLoader.getURLs()) {
+			File eachClassPath = new File(eachUrl.getFile());
+			if (!isJar(eachClassPath)) {
+				continue;
 			}
-			return agentTar;
+			if (isDependentLib(eachClassPath, libs)) {
+				addFileToTar(tarOutputStream, eachClassPath, libPath + eachClassPath.getName());
+			}
 		}
 	}
 
@@ -262,82 +134,11 @@ public class AgentPackageService {
 		return new TarArchiveOutputStream(new BufferedOutputStream(fos));
 	}
 
-	private void addMonitorConfToTar(TarArchiveOutputStream tarOutputStream, String basePath,
-	                                 Integer monitorPort) throws IOException {
-		final String config = getAgentConfigContent("agent_monitor.conf", buildMap("monitorPort",
-				(Object) String.valueOf(monitorPort)));
+	private void addConfigToTar(NGrinderPackage NGrinderPackage, TarArchiveOutputStream tarOutputStream, Map<String, Object> agentConfigParam) throws IOException {
+		final String config = getConfigContent(NGrinderPackage.getTemplateName(), agentConfigParam);
 		final byte[] bytes = config.getBytes();
-		addInputStreamToTar(tarOutputStream, new ByteArrayInputStream(bytes), basePath + "__agent.conf",
-				bytes.length, TarArchiveEntry.DEFAULT_FILE_MODE);
-	}
-
-	private void addAgentConfToTar(TarArchiveOutputStream tarOutputStream, String basePath,
-	                               String regionName, String connectingIP,
-	                               int port, String owner) throws IOException {
-		if (isNotEmpty(connectingIP)) {
-			final String config = getAgentConfigContent("agent_agent.conf", getAgentConfigParam(regionName,
-					connectingIP, port, owner));
-			final byte[] bytes = config.getBytes();
-			addInputStreamToTar(tarOutputStream, new ByteArrayInputStream(bytes), basePath + "__agent.conf",
-					bytes.length, TarArchiveEntry.DEFAULT_FILE_MODE);
-		}
-	}
-
-	private Set<String> getMonitorDependentLibs(URLClassLoader cl) throws IOException {
-		Set<String> libs = new HashSet<String>();
-		InputStream dependencyStream = null;
-		try {
-			dependencyStream = cl.getResourceAsStream("monitor-dependencies.txt");
-			final String dependencies = IOUtils.toString(dependencyStream);
-			for (String each : StringUtils.split(dependencies, ";")) {
-				libs.add(FilenameUtils.getBaseName(each.trim()).replace("-SNAPSHOT", ""));
-			}
-		} catch (Exception e) {
-			LOGGER.error("Error while loading monitor-dependencies.txt", e);
-		} finally {
-			IOUtils.closeQuietly(dependencyStream);
-		}
-
-		return libs;
-	}
-
-	private Set<String> getDependentLibs(URLClassLoader cl) throws IOException {
-		Set<String> libs = new HashSet<String>();
-		InputStream dependencyStream = null;
-		try {
-			dependencyStream = cl.getResourceAsStream("dependencies.txt");
-			final String dependencies = IOUtils.toString(dependencyStream);
-			for (String each : StringUtils.split(dependencies, ";")) {
-				libs.add(each.trim().replace("-SNAPSHOT", ""));
-			}
-			libs.add("ngrinder-core");
-			libs.add("ngrinder-runtime");
-			libs.add("ngrinder-groovy");
-		} catch (Exception e) {
-			LOGGER.error("Error while loading dependencies.txt", e);
-		} finally {
-			IOUtils.closeQuietly(dependencyStream);
-		}
-
-		return libs;
-	}
-
-	private Map<String, Object> getAgentConfigParam(String regionName, String controllerIP, int port, String owner) {
-		Map<String, Object> confMap = newHashMap();
-		confMap.put("controllerIP", controllerIP);
-		confMap.put("controllerPort", String.valueOf(port));
-		if (StringUtils.isEmpty(regionName)) {
-			regionName = "NONE";
-		}
-		if (StringUtils.isNotBlank(owner)) {
-			if (StringUtils.isEmpty(regionName)) {
-				regionName = "owned_" + owner;
-			} else {
-				regionName = regionName + "_owned_" + owner;
-			}
-		}
-		confMap.put("controllerRegion", regionName);
-		return confMap;
+		addInputStreamToTar(tarOutputStream, new ByteArrayInputStream(bytes), NGrinderPackage.getBasePath() + "__agent.conf",
+			bytes.length, TarArchiveEntry.DEFAULT_FILE_MODE);
 	}
 
 	/**
@@ -351,45 +152,13 @@ public class AgentPackageService {
 	}
 
 	/**
-	 * Check if this given lib file is the given library.
-	 *
-	 * @param libFile lib file
-	 * @param libName desirable name
-	 * @return true if dependent lib
-	 */
-	public boolean isAgentDependentLib(File libFile, String libName) {
-		return StringUtils.startsWith(libFile.getName(), libName);
-	}
-
-	/**
 	 * Check if this given lib file in the given lib set.
 	 *
 	 * @param libFile lib file
 	 * @param libs    lib set
 	 * @return true if dependent lib
 	 */
-	public boolean isMonitorDependentLib(File libFile, Set<String> libs) {
-		if (libFile.getName().contains("grinder-3.9.1.jar")) {
-			return false;
-		}
-		String name = libFile.getName();
-		name = name.replace(".jar", "").replace("-SNAPSHOT", "");
-		for (String each : libs) {
-			if (name.contains(each)) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * Check if this given lib file in the given lib set.
-	 *
-	 * @param libFile lib file
-	 * @param libs    lib set
-	 * @return true if dependent lib
-	 */
-	public boolean isAgentDependentLib(File libFile, Set<String> libs) {
+	private boolean isDependentLib(File libFile, Set<String> libs) {
 		if (libFile.getName().contains("grinder-3.9.1.jar")) {
 			return false;
 		}
@@ -406,20 +175,16 @@ public class AgentPackageService {
 	 * @param values       map of configurations.
 	 * @return generated string
 	 */
-	public String getAgentConfigContent(String templateName, Map<String, Object> values) {
-		StringWriter writer = null;
-		try {
+	public String getConfigContent(String templateName, Map<String, Object> values) {
+		try (StringWriter writer = new StringWriter()) {
 			Configuration config = new Configuration();
 			config.setClassForTemplateLoading(this.getClass(), "/ngrinder_agent_home_template");
 			config.setObjectWrapper(new DefaultObjectWrapper());
 			Template template = config.getTemplate(templateName);
-			writer = new StringWriter();
 			template.process(values, writer);
 			return writer.toString();
 		} catch (Exception e) {
 			throw processException("Error while fetching the script template.", e);
-		} finally {
-			IOUtils.closeQuietly(writer);
 		}
 	}
 
@@ -438,17 +203,12 @@ public class AgentPackageService {
 
 		@Override
 		public void process(ZipFile file, ZipEntry entry) throws IOException {
-			InputStream inputStream = null;
-			try {
-				inputStream = file.getInputStream(entry);
-
+			try (InputStream inputStream = file.getInputStream(entry)) {
 				if (filePredicate.evaluate(entry)) {
 					addInputStreamToTar(this.tao, inputStream, basePath + FilenameUtils.getName(entry.getName()),
 							entry.getSize(),
 							this.mode);
 				}
-			} finally {
-				IOUtils.closeQuietly(inputStream);
 			}
 		}
 	}

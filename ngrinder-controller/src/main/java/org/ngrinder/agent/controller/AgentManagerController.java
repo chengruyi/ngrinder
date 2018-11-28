@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 
 import static com.google.common.collect.Collections2.filter;
+import static org.ngrinder.agent.model.NGrinderPackage.AGENT;
 import static org.ngrinder.common.util.CollectionUtils.*;
 import static org.ngrinder.common.util.SpringSecurityUtils.containsAuthority;
 import static org.ngrinder.common.util.SpringSecurityUtils.getCurrentAuthorities;
@@ -96,10 +97,10 @@ public class AgentManagerController extends BaseController {
 		if (isClustered()) {
 			if (StringUtils.isNotBlank(region)) {
 				final RegionInfo regionInfo = regionService.getOne(region);
-				agentPackage = agentPackageService.createAgentPackage(region, regionInfo.getIp(), regionInfo.getControllerPort(), null);
+				agentPackage = agentPackageService.createAgentPackage(AGENT, region, regionInfo.getIp(), regionInfo.getControllerPort(), null);
 			}
 		} else {
-			agentPackage = agentPackageService.createAgentPackage("", "", getConfig().getControllerPort(), null);
+			agentPackage = agentPackageService.createAgentPackage(AGENT, "", "", getConfig().getControllerPort(), null);
 		}
 		if (agentPackage != null) {
 			model.addAttribute("downloadLink", "/agent/download/" + agentPackage.getName());
